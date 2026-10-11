@@ -1,0 +1,67 @@
+# Byte-compiled / cached Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Packaging / distribution
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.python-version
+
+# Testing / coverage / typing caches
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ML / experiment artifacts
+checkpoints/
+runs/
+outputs/
+logs/
+wandb/
+mlruns/
+lightning_logs/
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+*.h5
+
+# Generated datasets (regenerate from code)
+*.jsonl
+*.parquet
+*.npy
+*.npz
+data/
+datasets/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
