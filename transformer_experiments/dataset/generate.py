@@ -314,6 +314,33 @@ def index_lexicon():
 NOUNS_BY_TYPE, VERBS_BY_SUBJ, ADJS_BY_MOD, PP_BY_HEAD = index_lexicon()
 
 
+# Form -> lemma object maps, for recovering POS/number/transitivity info from
+# a surface token (e.g. during nonce substitution).
+NOUN_BY_FORM: dict[str, Noun] = {}
+for _n in NOUNS:
+    NOUN_BY_FORM[_n.singular] = _n
+    NOUN_BY_FORM[_n.plural] = _n
+VERB_BY_FORM: dict[tuple[str, str], Verb] = {}  # (form, number) -> Verb
+for _v in VERBS:
+    VERB_BY_FORM[(_v.singular, "singular")] = _v
+    VERB_BY_FORM[(_v.plural, "plural")] = _v
+ADJ_BY_FORM: dict[str, Adjective] = {a.form: a for a in ADJECTIVES}
+
+# Nouns indexed by their number form (every noun appears in both lists under
+# its singular surface and its plural surface). Convenient for nonce swaps.
+NOUNS_BY_NUMBER: dict[str, list[Noun]] = {
+    "singular": list(NOUNS),
+    "plural": list(NOUNS),
+}
+
+# Verbs indexed by number form and transitivity, for nonce swaps that preserve
+# both agreement form and sentence structure.
+VERBS_BY_NUMBER_TRANS: dict[tuple[str, bool], list[Verb]] = defaultdict(list)
+for _v in VERBS:
+    VERBS_BY_NUMBER_TRANS[("singular", _v.transitive)].append(_v)
+    VERBS_BY_NUMBER_TRANS[("plural", _v.transitive)].append(_v)
+
+
 # ---------------------------------------------------------------------------
 # Builder: accumulates tokens + metadata as the sentence is produced
 # ---------------------------------------------------------------------------
@@ -323,12 +350,27 @@ class Builder:
     tokens: list[str] = field(default_factory=list)
     roles: dict[str, int] = field(default_factory=dict)  # role -> token index
     attractor_numbers: list[str] = field(default_factory=list)
+    # One dict per content word (noun/verb/adj) in emission order:
+    #   {"index": int, "pos": "noun"|"verb"|"adj",
+    #    "number": "singular"|"plural"|None, "np_id": int|None}
+    # np_id groups adjectives emitted inside the same NP; it is None for verbs
+    # and for predicate adjectives emitted outside an NP builder.
+    content_tags: list[dict] = field(default_factory=list)
 
     def emit(self, tok: str, role: Optional[str] = None) -> int:
         idx = len(self.tokens)
         self.tokens.append(tok)
         if role:
             self.roles[role] = idx
+        return idx
+
+    def emit_content(self, tok: str, pos: str,
+                     number: Optional[str] = None,
+                     role: Optional[str] = None,
+                     np_id: Optional[int] = None) -> int:
+        idx = self.emit(tok, role=role)
+        self.content_tags.append({"index": idx, "pos": pos,
+                                  "number": number, "np_id": np_id})
         return idx
 
 
@@ -377,6 +419,7 @@ def build_np(b: Builder,
     copula predicate from echoing a subject-NP color).
     """
     noun = pick_noun(semtype, rng, exclude=exclude)
+    np_id = len(b.content_tags)  # a unique id for grouping this NP's content tags
     b.emit(rng.choice(DETERMINERS))
     n_adj = rng.randint(0, max_adj)
     used_forms: set[str] = set()
@@ -387,7 +430,7 @@ def build_np(b: Builder,
                            exclude_categories=used_cats)
         if a is None:
             break
-        b.emit(a.form)
+        b.emit_content(a.form, pos="adj", np_id=np_id)
         used_forms.add(a.form)
         if a.category is not None:
             used_cats.add(a.category)
@@ -395,7 +438,8 @@ def build_np(b: Builder,
             collect_adjs.append(a.form)
         if collect_adj_cats is not None and a.category is not None:
             collect_adj_cats.append(a.category)
-    b.emit(noun.form(number), role=role)
+    b.emit_content(noun.form(number), pos="noun", number=number,
+                   role=role, np_id=np_id)
     return noun
 
 
@@ -409,7 +453,8 @@ def tpl_simple(b: Builder, rng: random.Random, subj_number: str) -> dict:
     """Det (Adj)* N V."""
     subj = build_np(b, subj_number, None, rng, role="subject")
     verb = rng.choice(VERBS_BY_SUBJ[subj.semtype])
-    b.emit(verb.form(subj_number), role="main_verb")
+    b.emit_content(verb.form(subj_number), pos="verb",
+                   number=subj_number, role="main_verb")
     if verb.transitive:
         obj_type = rng.choice(list(verb.obj_types))
         obj_number = rng.choice(["singular", "plural"])
@@ -450,7 +495,8 @@ def tpl_pp(b: Builder, rng: random.Random, subj_number: str,
         chain_nouns.add(attr)
 
     verb = rng.choice(VERBS_BY_SUBJ[subj.semtype])
-    b.emit(verb.form(subj_number), role="main_verb")
+    b.emit_content(verb.form(subj_number), pos="verb",
+                   number=subj_number, role="main_verb")
     if verb.transitive:
         obj_type = rng.choice(list(verb.obj_types))
         obj_number = rng.choice(["singular", "plural"])
@@ -480,7 +526,8 @@ def tpl_relative_clause(b: Builder, rng: random.Random,
     # Embedded verb must license main subject's semtype as its subject.
     emb_verb_pool = VERBS_BY_SUBJ[subj.semtype]
     embedded_verb = rng.choice(emb_verb_pool)
-    b.emit(embedded_verb.form(subj_number))
+    b.emit_content(embedded_verb.form(subj_number), pos="verb",
+                   number=subj_number)
 
     attractor_numbers: list[str] = []
     if embedded_verb.transitive:
@@ -492,7 +539,8 @@ def tpl_relative_clause(b: Builder, rng: random.Random,
     # Main verb may repeat the embedded verb's form; resample to avoid awkwardness.
     main_verb_pool = [v for v in emb_verb_pool if v is not embedded_verb] or emb_verb_pool
     main_verb = rng.choice(main_verb_pool)
-    b.emit(main_verb.form(subj_number), role="main_verb")
+    b.emit_content(main_verb.form(subj_number), pos="verb",
+                   number=subj_number, role="main_verb")
     if main_verb.transitive:
         obj_type = rng.choice(list(main_verb.obj_types))
         obj_number = rng.choice(["singular", "plural"])
@@ -534,7 +582,7 @@ def _emit_copula_predicate(b: Builder, rng: random.Random,
     pred_kind = rng.choice(choices) if choices else "adj"
 
     if pred_kind == "adj" and adj_pool:
-        b.emit(rng.choice(adj_pool).form)
+        b.emit_content(rng.choice(adj_pool).form, pos="adj")
     elif pred_kind == "pp" and pp_pool:
         frame = rng.choice(pp_pool)
         b.emit(frame.prep)
@@ -574,11 +622,13 @@ def tpl_object_rc(b: Builder, rng: random.Random,
     emb_subj_number = rng.choice(["singular", "plural"])
     exclude = subj if emb_subj_type == subj.semtype else None
     build_np(b, emb_subj_number, emb_subj_type, rng, max_adj=0, exclude=exclude)
-    b.emit(emb_verb.form(emb_subj_number))
+    b.emit_content(emb_verb.form(emb_subj_number), pos="verb",
+                   number=emb_subj_number)
     # No overt embedded object — the object slot is the gap bound to the main subject.
 
     main_verb = rng.choice(VERBS_BY_SUBJ[subj.semtype])
-    b.emit(main_verb.form(subj_number), role="main_verb")
+    b.emit_content(main_verb.form(subj_number), pos="verb",
+                   number=subj_number, role="main_verb")
     if main_verb.transitive:
         obj_type = rng.choice(list(main_verb.obj_types))
         obj_number = rng.choice(["singular", "plural"])
@@ -601,7 +651,7 @@ def tpl_copula(b: Builder, rng: random.Random, subj_number: str) -> dict:
                     collect_adjs=subj_adjs, collect_adj_cats=subj_adj_cats)
 
     cop_sg, cop_pl = COPULA
-    b.emit(cop_sg if subj_number == "singular" else cop_pl, role="main_verb")
+    b.emit_content(cop_sg if subj_number == "singular" else cop_pl, pos="verb", number=subj_number, role="main_verb")
     _emit_copula_predicate(b, rng, subj,
                            exclude_adj_forms=set(subj_adjs),
                            exclude_adj_cats=set(subj_adj_cats),
@@ -644,7 +694,7 @@ def tpl_pp_copula(b: Builder, rng: random.Random, subj_number: str,
         chain_nouns.add(attr)
 
     cop_sg, cop_pl = COPULA
-    b.emit(cop_sg if subj_number == "singular" else cop_pl, role="main_verb")
+    b.emit_content(cop_sg if subj_number == "singular" else cop_pl, pos="verb", number=subj_number, role="main_verb")
     _emit_copula_predicate(b, rng, subj,
                            exclude_adj_forms=set(subj_adjs),
                            exclude_adj_cats=set(subj_adj_cats),
@@ -693,8 +743,85 @@ def generate_sentence(template_name: str, subj_number: str,
         "verb_correct": verb_correct,
         "verb_incorrect": verb_incorrect,
         "attractor_numbers": b.attractor_numbers,
+        "content_tags": b.content_tags,
         **tpl_meta,
     }
+
+
+# ---------------------------------------------------------------------------
+# Nonce substitution (Gulordava et al. 2018)
+#
+# Swap every content word (noun / verb / adj) for a random same-POS word that
+# preserves the morphosyntactic features needed to keep the sentence
+# grammatical, but is otherwise free of semantic constraints:
+#   - noun: same number, DIFFERENT semtype
+#   - verb: same number form, same transitivity (so the sentence shape stays
+#           valid when a transitive verb's object NP is still present)
+#   - adj:  any adjective form, with intra-NP form dedup via np_id
+# ---------------------------------------------------------------------------
+
+def make_nonce(record: dict, rng: random.Random) -> dict:
+    """Return a nonce copy of `record` with content words substituted.
+
+    Preserves grammatical structure and all metadata that depends only on
+    structure (positions, numbers, attractor list). Rebuilds `verb_correct` /
+    `verb_incorrect` from the new main verb's lemma pair.
+    """
+    tokens = list(record["tokens"])
+    tags = record["content_tags"]
+    # Track adjective forms already emitted in each NP so we don't produce
+    # "small small" after a swap.
+    used_adj_forms_per_np: dict[int, set[str]] = defaultdict(set)
+    new_main_verb: Optional[Verb] = None
+
+    for tag in tags:
+        idx = tag["index"]
+        original = tokens[idx]
+        pos = tag["pos"]
+
+        if pos == "noun":
+            orig_noun = NOUN_BY_FORM.get(original)
+            number = tag["number"]
+            if orig_noun is None:
+                continue
+            pool = [n for n in NOUNS_BY_NUMBER[number]
+                    if n.semtype != orig_noun.semtype]
+            new_noun = rng.choice(pool) if pool else orig_noun
+            tokens[idx] = new_noun.form(number)
+
+        elif pos == "verb":
+            number = tag["number"]
+            orig_verb = VERB_BY_FORM.get((original, number))
+            if orig_verb is None:
+                continue
+            pool = [v for v in VERBS_BY_NUMBER_TRANS[(number, orig_verb.transitive)]
+                    if v is not orig_verb]
+            new_verb = rng.choice(pool) if pool else orig_verb
+            tokens[idx] = new_verb.form(number)
+            if idx == record.get("verb_position"):
+                new_main_verb = new_verb
+
+        elif pos == "adj":
+            np_id = tag.get("np_id")
+            used = used_adj_forms_per_np[np_id] if np_id is not None else set()
+            pool = [a for a in ADJECTIVES
+                    if a.form != original and a.form not in used]
+            if not pool:
+                pool = [a for a in ADJECTIVES if a.form != original] or ADJECTIVES
+            new_adj = rng.choice(pool)
+            tokens[idx] = new_adj.form
+            if np_id is not None:
+                used_adj_forms_per_np[np_id].add(new_adj.form)
+
+    nonce = dict(record)
+    nonce["tokens"] = tokens
+    nonce["is_nonce"] = True
+    if new_main_verb is not None:
+        nonce["verb_correct"] = new_main_verb.form(record["subject_number"])
+        nonce["verb_incorrect"] = new_main_verb.form(
+            "plural" if record["subject_number"] == "singular" else "singular"
+        )
+    return nonce
 
 
 # ---------------------------------------------------------------------------
@@ -704,21 +831,23 @@ def generate_sentence(template_name: str, subj_number: str,
 def sample_sentences(n_per_template: int = 3,
                      templates: Optional[list[str]] = None,
                      seed: Optional[int] = None) -> None:
-    """Print n_per_template sampled sentences for each template."""
+    """Print n_per_template sampled sentences for each template, with the
+    Gulordava-style nonce substitution shown directly below each original."""
     rng = random.Random(seed)
     templates = templates or list(TEMPLATES)
-    width = max(len(t) for t in templates)
     for tpl in templates:
         print(f"\n=== {tpl} ===")
         for _ in range(n_per_template):
             number = rng.choice(["singular", "plural"])
             rec = generate_sentence(tpl, number, rng)
+            nonce = make_nonce(rec, rng)
             agr = sum(1 for a in rec["attractor_numbers"]
                       if a != rec["subject_number"])
-            sent = " ".join(rec["tokens"])
-            print(f"[{tpl:<{width}}] [subj={rec['subject_number']:8}]"
-                  f" [n_attr={rec['n_attractors']}, agr_mismatch={agr}]"
-                  f"  {sent}")
+            header = (f"[subj={rec['subject_number']:8}]"
+                      f" [n_attr={rec['n_attractors']}, agr_mismatch={agr}]")
+            print(f"  {header}")
+            print(f"    ORIG : {' '.join(rec['tokens'])}")
+            print(f"    NONCE: {' '.join(nonce['tokens'])}")
 
 
 if __name__ == "__main__":
