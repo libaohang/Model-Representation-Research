@@ -4,7 +4,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field, asdict
 from collections import defaultdict
-from typing import Optional
+from typing import Iterable, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ NOUNS: list[Noun] = [
     Noun("park", "parks", "location"),
     Noun("forest", "forests", "location"),
     Noun("building", "buildings", "location"),
-    Noun("montain", "mountains", "location"),
+    Noun("mountain", "mountains", "location"),
 ]
 
 VERBS: list[Verb] = [
@@ -126,7 +126,6 @@ VERBS: list[Verb] = [
     Verb("collapses", "collapse", frozenset({"furniture"})),
     Verb("breaks", "break", frozenset({"furniture"})),
     Verb("shakes", "shake", frozenset({"furniture"})),
-    Verb("shines", "shine", frozenset({"object"})),
     Verb("remains", "remain", frozenset({"object", "location"})),
     Verb("burns", "burn", frozenset({"location"})),
     Verb("exists", "exist", frozenset({"animal", "person", "vehicle", "furniture", "container", "object", "location"})),
@@ -338,10 +337,11 @@ class Builder:
 # ---------------------------------------------------------------------------
 
 def pick_noun(semtype: Optional[str], rng: random.Random,
-              exclude: Optional[Noun] = None) -> Noun:
+              exclude: "Optional[Noun | Iterable[Noun]]" = None) -> Noun:
     pool = NOUNS_BY_TYPE[semtype] if semtype else NOUNS
     if exclude is not None:
-        filtered = [n for n in pool if n is not exclude]
+        ex: set[Noun] = {exclude} if isinstance(exclude, Noun) else set(exclude)
+        filtered = [n for n in pool if n not in ex]
         if filtered:
             pool = filtered
     return rng.choice(pool)
@@ -365,7 +365,7 @@ def build_np(b: Builder,
              rng: random.Random,
              max_adj: int = 2,
              role: Optional[str] = None,
-             exclude: Optional[Noun] = None,
+             exclude: "Optional[Noun | Iterable[Noun]]" = None,
              collect_adjs: Optional[list[str]] = None,
              collect_adj_cats: Optional[list[str]] = None) -> Noun:
     """Emit 'Det (Adj)* N' and return the chosen noun.
@@ -431,7 +431,7 @@ def tpl_pp(b: Builder, rng: random.Random, subj_number: str,
     subj = build_np(b, subj_number, subj_type, rng, max_adj=1, role="subject")
 
     current_head_type = subj.semtype
-    current_head_noun = subj
+    chain_nouns: set[Noun] = {subj}
     attractor_numbers: list[str] = []
     for _ in range(n_pps):
         frames = PP_BY_HEAD.get(current_head_type, [])
@@ -441,21 +441,21 @@ def tpl_pp(b: Builder, rng: random.Random, subj_number: str,
         b.emit(frame.prep)
         attr_number = rng.choice(["singular", "plural"])
         attractor_numbers.append(attr_number)
-        # For same-class "near", complement must be a different noun than the head.
-        exclude = (current_head_noun
-                   if frame.prep == "near" and frame.comp_type == current_head_type
-                   else None)
+        # Exclude every noun already in the chain, so same-class "near" (and
+        # any other preposition that happens to re-pick a prior lexeme) never
+        # yields "the fields near the houses near the field".
         attr = build_np(b, attr_number, frame.comp_type, rng, max_adj=0,
-                        exclude=exclude)
+                        exclude=chain_nouns)
         current_head_type = attr.semtype
-        current_head_noun = attr
+        chain_nouns.add(attr)
 
     verb = rng.choice(VERBS_BY_SUBJ[subj.semtype])
     b.emit(verb.form(subj_number), role="main_verb")
     if verb.transitive:
         obj_type = rng.choice(list(verb.obj_types))
         obj_number = rng.choice(["singular", "plural"])
-        build_np(b, obj_number, obj_type, rng, max_adj=0, role="object")
+        build_np(b, obj_number, obj_type, rng, max_adj=0, role="object",
+                 exclude=chain_nouns)
 
     b.attractor_numbers = attractor_numbers
     return {
@@ -510,15 +510,20 @@ def tpl_relative_clause(b: Builder, rng: random.Random,
 def _emit_copula_predicate(b: Builder, rng: random.Random,
                            subj: Noun,
                            exclude_adj_forms: Optional[set[str]] = None,
-                           exclude_adj_cats: Optional[set[str]] = None) -> None:
+                           exclude_adj_cats: Optional[set[str]] = None,
+                           exclude_nouns: Optional[set[Noun]] = None) -> None:
     """Emit an AP or licensed PP as a copula predicate.
 
     Adjective predicates will not echo any form in `exclude_adj_forms` or any
     category in `exclude_adj_cats` (typically the subject NP's adjectives and
-    their categories, so "the blue phone is red" doesn't occur).
+    their categories, so "the blue phone is red" doesn't occur). A PP
+    predicate's complement will not reuse any noun in `exclude_nouns`
+    (typically the subject + its attractor chain, so pp_copula sentences don't
+    end with "near the helicopters" when "helicopters" already appeared).
     """
     exclude_adj_forms = exclude_adj_forms or set()
     exclude_adj_cats = exclude_adj_cats or set()
+    exclude_nouns = exclude_nouns or set()
     adj_pool = [a for a in ADJS_BY_MOD.get(subj.semtype, [])
                 if a.form not in exclude_adj_forms
                 and (a.category is None or a.category not in exclude_adj_cats)]
@@ -534,9 +539,8 @@ def _emit_copula_predicate(b: Builder, rng: random.Random,
         frame = rng.choice(pp_pool)
         b.emit(frame.prep)
         comp_number = rng.choice(["singular", "plural"])
-        exclude = (subj if frame.prep == "near" and frame.comp_type == subj.semtype
-                   else None)
-        build_np(b, comp_number, frame.comp_type, rng, max_adj=0, exclude=exclude)
+        build_np(b, comp_number, frame.comp_type, rng, max_adj=0,
+                 exclude=exclude_nouns)
 
 
 def tpl_object_rc(b: Builder, rng: random.Random,
@@ -600,7 +604,8 @@ def tpl_copula(b: Builder, rng: random.Random, subj_number: str) -> dict:
     b.emit(cop_sg if subj_number == "singular" else cop_pl, role="main_verb")
     _emit_copula_predicate(b, rng, subj,
                            exclude_adj_forms=set(subj_adjs),
-                           exclude_adj_cats=set(subj_adj_cats))
+                           exclude_adj_cats=set(subj_adj_cats),
+                           exclude_nouns={subj})
 
     # Nothing between subject and verb, so no attractors.
     return {
@@ -623,7 +628,7 @@ def tpl_pp_copula(b: Builder, rng: random.Random, subj_number: str,
                     collect_adjs=subj_adjs, collect_adj_cats=subj_adj_cats)
 
     current_head_type = subj.semtype
-    current_head_noun = subj
+    chain_nouns: set[Noun] = {subj}
     attractor_numbers: list[str] = []
     for _ in range(n_pps):
         frames = PP_BY_HEAD.get(current_head_type, [])
@@ -633,19 +638,17 @@ def tpl_pp_copula(b: Builder, rng: random.Random, subj_number: str,
         b.emit(frame.prep)
         attr_number = rng.choice(["singular", "plural"])
         attractor_numbers.append(attr_number)
-        exclude = (current_head_noun
-                   if frame.prep == "near" and frame.comp_type == current_head_type
-                   else None)
         attr = build_np(b, attr_number, frame.comp_type, rng, max_adj=0,
-                        exclude=exclude)
+                        exclude=chain_nouns)
         current_head_type = attr.semtype
-        current_head_noun = attr
+        chain_nouns.add(attr)
 
     cop_sg, cop_pl = COPULA
     b.emit(cop_sg if subj_number == "singular" else cop_pl, role="main_verb")
     _emit_copula_predicate(b, rng, subj,
                            exclude_adj_forms=set(subj_adjs),
-                           exclude_adj_cats=set(subj_adj_cats))
+                           exclude_adj_cats=set(subj_adj_cats),
+                           exclude_nouns=chain_nouns)
 
     b.attractor_numbers = attractor_numbers
     return {
