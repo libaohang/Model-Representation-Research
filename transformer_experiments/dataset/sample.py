@@ -23,7 +23,7 @@ from typing import Optional
 
 import numpy as np
 
-from transformer_experiments.dataset.generate import generate_sentence
+from .generate import generate_sentence
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +206,7 @@ def _fill_cell(cube: dict, cell: Cell, n_per_cell: int,
     n_attr = cell.n_attractors
     n_mis = cell.n_mismatched_attractors
     target_last_mis = cell.last_attractor_mismatch
+    seen = set()
 
     while k < n_per_cell:
         if attempts >= max_attempts:
@@ -216,6 +217,10 @@ def _fill_cell(cube: dict, cell: Cell, n_per_cell: int,
         attempts += 1
         rec = generate_sentence(cell.generator_name, cell.subject_number, rng)
 
+        tok_key = tuple(rec["tokens"])
+        if tok_key in seen:
+            continue
+    
         if rec["n_attractors"] != n_attr:
             continue
         rec_n_mis = sum(
@@ -226,6 +231,7 @@ def _fill_cell(cube: dict, cell: Cell, n_per_cell: int,
         if rec["last_attractor_mismatch"] != target_last_mis:
             continue
 
+        seen.add(tok_key)
         _write_record(cube, rec, (*cell.index, k), cell.template_group,
                       rec_n_mis)
         k += 1
@@ -254,6 +260,71 @@ def _write_record(cube: dict, rec: dict, slot: tuple[int, ...],
     cube["attractor_numbers"][slot] = list(rec["attractor_numbers"])
     cube["last_attractor_mismatch"][slot] = rec["last_attractor_mismatch"]
     cube["content_tags"][slot] = list(rec["content_tags"])
+
+
+# ---------------------------------------------------------------------------
+# Splitting along the sample axis (stratified-by-cell by construction)
+# ---------------------------------------------------------------------------
+
+# All columns with the per-sample `k` axis.
+_PER_SAMPLE_COLUMNS: list[str] = INT_COLUMNS + OBJECT_COLUMNS
+
+
+def split_cube(cube: dict, splits: dict[str, float],
+               seed: Optional[int] = None) -> dict[str, dict]:
+    """Split a cube along the sample axis per cell. Each returned sub-cube has
+    the same 5 structural axes; only the last (sample) axis is shortened.
+
+    `splits` maps a name to a fraction; fractions should sum to 1.0 (within
+    floating-point tolerance). Each cell is partitioned deterministically with
+    the same proportions, so balance is preserved in every sub-cube.
+
+    If `seed` is given, each cell's samples are shuffled independently before
+    the split (useful if generation order correlates with sampling attempt
+    count — in practice samples within a cell are already i.i.d., but shuffling
+    makes probe train/eval splits reproducible across code changes).
+    """
+    total = sum(splits.values())
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError(f"split fractions must sum to 1.0, got {total}")
+
+    n_per_cell = int(cube["cell_count"].max())
+    names = list(splits)
+    # Integer counts per split; distribute the remainder to earlier splits.
+    counts = [int(splits[name] * n_per_cell) for name in names]
+    remainder = n_per_cell - sum(counts)
+    for i in range(remainder):
+        counts[i] += 1
+    assert sum(counts) == n_per_cell, (counts, n_per_cell)
+
+    # Per-cell permutations (or identity ranges).
+    rng = np.random.default_rng(seed)
+    valid_idx = np.argwhere(cube["cell_valid"])
+    perms: dict[tuple, np.ndarray] = {}
+    for idx in valid_idx:
+        key = tuple(int(x) for x in idx)
+        perms[key] = (rng.permutation(n_per_cell) if seed is not None
+                      else np.arange(n_per_cell))
+
+    # Allocate each sub-cube with the right sample-axis size.
+    sub_cubes: dict[str, dict] = {}
+    offsets = np.cumsum([0] + counts)
+    for name, size, start in zip(names, counts, offsets[:-1]):
+        sub = _empty_cube(size)
+        # Carry over mask + axis labels verbatim.
+        sub["cell_valid"] = cube["cell_valid"].copy()
+        sub["cell_count"] = np.where(cube["cell_valid"], size, 0).astype(np.int32)
+        for k in ("axis_template_group", "axis_subject_number",
+                  "axis_last_mismatch"):
+            sub[k] = cube[k].copy()
+        sub_cubes[name] = sub
+
+        for cell_key, perm in perms.items():
+            cell_slice = perm[start:start + size]
+            for col in _PER_SAMPLE_COLUMNS:
+                src = cube[col][cell_key]           # shape (n_per_cell,)
+                sub[col][cell_key] = src[cell_slice]
+    return sub_cubes
 
 
 # ---------------------------------------------------------------------------

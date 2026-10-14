@@ -744,8 +744,7 @@ def generate_sentence(template_name: str, subj_number: str,
         "verb_incorrect": verb_incorrect,
         "attractor_numbers": b.attractor_numbers,
         "last_attractor_mismatch": (
-            None if not b.attractor_numbers
-            else b.attractor_numbers[-1] != subj_number
+            b.attractor_numbers[-1] != subj_number if b.attractor_numbers else None
         ),
         "content_tags": b.content_tags,
         **tpl_meta,

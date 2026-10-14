@@ -1,7 +1,9 @@
 import numpy as np
+from Test import testNetwork
 
 # sequences : (numSentences, maxLen) integer token ids, one sentence per row, right-padded with padId
-def trainNetwork(network, loss, optimizer, sequences, padId, epochs = 5, batchSize = 100, lrDecayStart=10):
+# valSequences : held-out sentences in the same format, evaluated at the end of every epoch
+def trainNetwork(network, loss, optimizer, sequences, padId, valSequences, epochs = 5, batchSize = 100, lrDecayStart=10):
     sampleSize = sequences.shape[0]
 
     for epoch in range(epochs):
@@ -36,6 +38,10 @@ def trainNetwork(network, loss, optimizer, sequences, padId, epochs = 5, batchSi
             optimizer.lrDecay()
         epochLoss /= numBatches
         print(f"Training error on epoch {1 + epoch} is {epochLoss}")
+
+        valLoss, valAcc = testNetwork(network, valSequences, loss, padId, batchSize)
+        print(f"Validation error on epoch {1 + epoch} is {valLoss}")
+        print(f"Validation accuracy on epoch {1 + epoch} is {valAcc}")
 
 
     return network
