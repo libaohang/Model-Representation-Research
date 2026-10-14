@@ -743,6 +743,10 @@ def generate_sentence(template_name: str, subj_number: str,
         "verb_correct": verb_correct,
         "verb_incorrect": verb_incorrect,
         "attractor_numbers": b.attractor_numbers,
+        "last_attractor_mismatch": (
+            None if not b.attractor_numbers
+            else b.attractor_numbers[-1] != subj_number
+        ),
         "content_tags": b.content_tags,
         **tpl_meta,
     }
@@ -843,6 +847,10 @@ def sample_sentences(n_per_template: int = 3,
             nonce = make_nonce(rec, rng)
             agr = sum(1 for a in rec["attractor_numbers"]
                       if a != rec["subject_number"])
+
+            verify_record(rec)
+            verify_record(nonce)
+
             header = (f"[subj={rec['subject_number']:8}]"
                       f" [n_attr={rec['n_attractors']}, agr_mismatch={agr}]")
             print(f"  {header}")
@@ -850,5 +858,29 @@ def sample_sentences(n_per_template: int = 3,
             print(f"    NONCE: {' '.join(nonce['tokens'])}")
 
 
+def verify_record(rec: dict) -> None:
+    """Assert structural invariants on a sentence record (original or nonce).
+
+    These are properties of the record itself; nothing is re-generated.
+    """
+    verb_pos = rec["verb_position"]
+    subj_pos = rec["subject_position"]
+    assert subj_pos is not None and verb_pos is not None, \
+        "subject and main verb positions must be set"
+    assert subj_pos < verb_pos, \
+        f"subject at {subj_pos} should precede verb at {verb_pos}"
+    assert rec["tokens"][verb_pos] == rec["verb_correct"], \
+        f"token at verb_position ({rec['tokens'][verb_pos]!r}) " \
+        f"must equal verb_correct ({rec['verb_correct']!r})"
+    assert rec["verb_correct"] != rec["verb_incorrect"], \
+        "verb_correct and verb_incorrect must differ"
+    assert len(rec["attractor_numbers"]) == rec["n_attractors"], \
+        f"attractor_numbers length ({len(rec['attractor_numbers'])}) " \
+        f"must equal n_attractors ({rec['n_attractors']})"
+    assert rec["subject_number"] in ("singular", "plural")
+    for a in rec["attractor_numbers"]:
+        assert a in ("singular", "plural")
+
+
 if __name__ == "__main__":
-    sample_sentences(n_per_template=4, seed=60)
+    sample_sentences(n_per_template=4, seed=0)
