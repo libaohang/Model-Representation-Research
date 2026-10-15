@@ -2,10 +2,12 @@ import numpy as np
 from Test import testNetwork
 
 # sequences : (numSentences, maxLen) integer token ids, one sentence per row, right-padded with padId
-# valSequences : held-out sentences in the same format, evaluated at the end of every epoch
-def trainNetwork(network, loss, optimizer, sequences, padId, valSequences, epochs = 5, batchSize = 100, lrDecayStart=10):
+# valData : held-out data evaluated at the end of every epoch; dict of aligned arrays from buildDataset in train_gpt.py
+#           (tokens in the same format as sequences, plus the main verb's position and correct/incorrect forms)
+# saveDir : existing folder to save the weights to after every epoch; None skips saving
+def trainNetwork(network, loss, optimizer, sequences, padId, valData, epochs = 5, batchSize = 100, lrDecayStart=10, saveDir=None):
     sampleSize = sequences.shape[0]
-
+    
     for epoch in range(epochs):
         epochLoss = 0.0
         numBatches = 0
@@ -13,9 +15,6 @@ def trainNetwork(network, loss, optimizer, sequences, padId, valSequences, epoch
         indices = np.random.permutation(sampleSize)
         sequences = sequences[indices]
 
-        import time
-
-        t0 = time.time()
         for batch in range(0, sampleSize, batchSize):
             batchSeq = sequences[batch : batch + batchSize]
             # Next-token prediction: the target at each position is the following token
@@ -35,19 +34,24 @@ def trainNetwork(network, loss, optimizer, sequences, padId, valSequences, epoch
 
             network.backward(gradient)
             optimizer.step()
-            if batch == 100:
-                dt = time.time() - t0
-                print(f"100 batches took {dt:.2f}s")
 
         if (epoch == lrDecayStart - 1):
             print("lr decay")
             optimizer.lrDecay()
         epochLoss /= numBatches
+
+        #dt = time.time() - t0
+        #print(f"1 epoch took {dt:.2f}s")
         print(f"Training error on epoch {1 + epoch} is {epochLoss}")
 
-        valLoss, valAcc = testNetwork(network, valSequences, loss, padId, batchSize)
+        valLoss, agreementAcc, lastMismatchAcc = testNetwork(network, valData, loss, padId, batchSize)
         print(f"Validation error on epoch {1 + epoch} is {valLoss}")
-        print(f"Validation accuracy on epoch {1 + epoch} is {valAcc}")
+        print(f"Validation agreement accuracy on epoch {1 + epoch} is {agreementAcc}")
+        print(f"Validation agreement accuracy (last attractor mismatched) on epoch {1 + epoch} is {lastMismatchAcc}")
+
+        if saveDir is not None:
+            params = [arr for (arr, name) in network.parameters()]
+            np.savez(f"{saveDir}/GPT_{1 + epoch}epochs.npz", *params)
 
 
     return network
