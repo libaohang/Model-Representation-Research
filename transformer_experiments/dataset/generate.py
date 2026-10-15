@@ -210,7 +210,7 @@ VERBS: list[Verb] = [
 
 # Copula is handled separately from VERBS so it isn't sampled by non-copula
 # templates (which would produce fragments like "the chair is").
-COPULA = ("is", "are")  # (singular, plural)
+COPULA = ["is", "are"]  # (singular, plural)
 
 ADJECTIVES: list[Adjective] = [
     # size
@@ -286,6 +286,21 @@ PP_FRAMES: list[PPFrame] = [
 
 COMPLEMENTIZER = "that"
 
+nouns = []
+for noun in NOUNS:
+    nouns.append(noun.singular)
+    nouns.append(noun.plural)
+
+verbs = []
+for verb in VERBS:
+    verbs.append(verb.singular)
+    verbs.append(verb.plural)
+
+adjectives = [adj.form for adj in ADJECTIVES]
+
+prepositions = sorted({frame.prep for frame in PP_FRAMES})
+
+VOCABULARY = sorted(nouns + verbs + adjectives + COPULA + [COMPLEMENTIZER] + DETERMINERS + prepositions)
 
 # ---- indexes --------------------------------------------------------------
 

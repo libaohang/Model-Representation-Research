@@ -13,6 +13,9 @@ def trainNetwork(network, loss, optimizer, sequences, padId, valSequences, epoch
         indices = np.random.permutation(sampleSize)
         sequences = sequences[indices]
 
+        import time
+
+        t0 = time.time()
         for batch in range(0, sampleSize, batchSize):
             batchSeq = sequences[batch : batch + batchSize]
             # Next-token prediction: the target at each position is the following token
@@ -32,6 +35,9 @@ def trainNetwork(network, loss, optimizer, sequences, padId, valSequences, epoch
 
             network.backward(gradient)
             optimizer.step()
+            if batch == 100:
+                dt = time.time() - t0
+                print(f"100 batches took {dt:.2f}s")
 
         if (epoch == lrDecayStart - 1):
             print("lr decay")
