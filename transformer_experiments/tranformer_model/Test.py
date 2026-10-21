@@ -3,7 +3,8 @@ import numpy as np
 # data : dict of aligned arrays built by buildDataset in train_gpt.py
 #   tokens (N, maxLen), verbPosition (N,), verbCorrect (N,), verbIncorrect (N,), lastMismatch (N,) bool
 # Returns the loss per target token, the subject-verb agreement accuracy over all sentences,
-# and the agreement accuracy over sentences whose last attractor mismatches the subject
+# the agreement accuracy over sentences whose last attractor mismatches the subject,
+# and the mean margin log P(correct verb) - log P(incorrect verb) over the same two sets
 def testNetwork(network, data, loss, padId, batchSize = 100):
     sequences = data["tokens"]
     sampleSize = sequences.shape[0]
@@ -12,6 +13,8 @@ def testNetwork(network, data, loss, padId, batchSize = 100):
     totalAgree = 0
     mismatchAgree = 0
     mismatchCount = 0
+    totalMargin = 0.0
+    mismatchMargin = 0.0
 
     for batch in range(0, sampleSize, batchSize):
         batchSeq = sequences[batch : batch + batchSize]
@@ -43,11 +46,23 @@ def testNetwork(network, data, loss, padId, batchSize = 100):
         mismatchAgree += int(np.sum(agree & mismatch))
         mismatchCount += int(np.sum(mismatch))
 
+        # Margin: log P(correct verb) - log P(incorrect verb) at the verb position
+        # Both log-probabilities share the same softmax normalizer, so this equals the difference of the two logits;
+        # unlike a probability difference it is unaffected by how probability is spread over other verbs
+        # Positive means the correct form is preferred; 0 means no preference
+        margin = (verbLogits[rows, data["verbCorrect"][batch : batch + batchSize]] -
+                  verbLogits[rows, data["verbIncorrect"][batch : batch + batchSize]])
+        totalMargin += float(np.sum(margin))
+        mismatchMargin += float(np.sum(margin[mismatch]))
+
 
     # Loss is per target token, averaged over every non-padded position in the dataset
     avgLoss = totalLoss / totalTokens
     # Agreement accuracies are per sentence
     agreementAcc = totalAgree / sampleSize
     lastMismatchAcc = mismatchAgree / mismatchCount if mismatchCount > 0 else float("nan")
+    # Margins are averaged per sentence
+    avgMargin = totalMargin / sampleSize
+    lastMismatchMargin = mismatchMargin / mismatchCount if mismatchCount > 0 else float("nan")
 
-    return avgLoss, agreementAcc, lastMismatchAcc
+    return avgLoss, agreementAcc, lastMismatchAcc, avgMargin, lastMismatchMargin

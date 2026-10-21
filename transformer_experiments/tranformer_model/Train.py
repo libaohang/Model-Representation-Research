@@ -44,10 +44,12 @@ def trainNetwork(network, loss, optimizer, sequences, padId, valData, epochs = 5
         #print(f"1 epoch took {dt:.2f}s")
         print(f"Training error on epoch {1 + epoch} is {epochLoss}")
 
-        valLoss, agreementAcc, lastMismatchAcc = testNetwork(network, valData, loss, padId, batchSize)
+        valLoss, agreementAcc, lastMismatchAcc, margin, lastMismatchMargin = testNetwork(network, valData, loss, padId, batchSize)
         print(f"Validation error on epoch {1 + epoch} is {valLoss}")
         print(f"Validation agreement accuracy on epoch {1 + epoch} is {agreementAcc}")
         print(f"Validation agreement accuracy (last attractor mismatched) on epoch {1 + epoch} is {lastMismatchAcc}")
+        print(f"Validation margin on epoch {1 + epoch} is {margin}")
+        print(f"Validation margin (last attractor mismatched) on epoch {1 + epoch} is {lastMismatchMargin}")
 
         if saveDir is not None:
             params = [arr for (arr, name) in network.parameters()]

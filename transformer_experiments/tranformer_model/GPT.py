@@ -52,3 +52,18 @@ class GPT(Layer):
     def zeroGradient(self):
         for grad, _ in self.gradients():
             grad[...] = 0
+    
+    def probeLayer(self, ids, probeLayer):
+        # ids : (batch, seqLen) integers, seqLen <= contextLen
+        # probeLayer=0 returns the state after embeddings and before block 0;
+        # probeLayer=k (1..numLayers) returns the state after block k-1.
+        input = ids
+        assert 0 <= probeLayer <= len(self.blocks)
+        count = -2
+        for layer in self.layers:
+            if count == probeLayer:
+                break
+            input = layer.forward(input)
+            count += 1
+        # hidden states : (batch, seqLen, modelDim)
+        return input

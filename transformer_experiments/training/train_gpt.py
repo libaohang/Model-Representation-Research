@@ -82,7 +82,7 @@ model = GPT(vocabSize=len(VOCAB), contextLen=16, modelDim=32, numHeads=4, numLay
 optimizer = AdamW(model, lr=0.001, weightDecay=0.001)
 
 # Weights go to transformer_experiments/model/, created if missing
-modelDir = ROOT / "model_32dim_4heads"
+modelDir = ROOT / "model/model_32dim_4heads"
 modelDir.mkdir(exist_ok=True)
 
 model = trainNetwork(model, crossEntropyLoss, optimizer, trainData["tokens"], padId, valData, epochs = 6, batchSize = 100, saveDir=modelDir)
@@ -96,7 +96,9 @@ testData = buildDataset(testCube)
 #for i, (p, _) in enumerate(model.parameters()):
 #    p[...] = data[f"arr_{i}"]
 
-testLoss, agreementAcc, lastMismatchAcc = testNetwork(model, testData, crossEntropyLoss, padId, batchSize = 100)
+testLoss, agreementAcc, lastMismatchAcc, margin, lastMismatchMargin = testNetwork(model, testData, crossEntropyLoss, padId, batchSize = 100)
 print(f"Test error is {testLoss}")
 print(f"Test agreement accuracy is {agreementAcc}")
 print(f"Test agreement accuracy (last attractor mismatched) is {lastMismatchAcc}")
+print(f"Test margin is {margin}")
+print(f"Test margin (last attractor mismatched) is {lastMismatchMargin}")
