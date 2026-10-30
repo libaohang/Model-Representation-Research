@@ -112,14 +112,15 @@ def compareProbes():
 
 def layerSelectivity():
     results = []
+    layerEpochs = [7, 6, 9, 8, 6]
 
-    for layer in range(5):
+    for epoch, layer in zip(layerEpochs, range(5)):
         print(f"\n=== Layer {layer} ===")
         probeData = makeProbeData(model, layer=layer)
 
         normalProbe = Linear(32, 2)
         controlProbe = Linear(32, 2)
-        result = trainProbes(normalProbe, controlProbe, probeData, epochs=6)
+        result = trainProbes(normalProbe, controlProbe, probeData, epochs=epoch)
         results.append((layer, result))
 
     print("\n=== Summary ===")
