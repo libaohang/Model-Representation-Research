@@ -1,0 +1,11 @@
+__pycache__/
+data/
+*.pyc
+CelebA-checkpoints/
+CIFAR10-checkpoints/
+CelebA-samples/
+CIFAR10-samples/
+times.txt
+ckpt_step_229407_ema_fp16.pt
+resize.py
+testSimilar.py
