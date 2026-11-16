@@ -47,16 +47,7 @@ def splitByIdentity(seed):
     return splitOf
 
 
-def makeControlLabels(seed):
-    # one random 0/1 label per identity, inherited by every image of that person
-    rng = np.random.default_rng(seed)
-    people = np.unique(IDENTITY)
-    labels = rng.integers(0, 2, size=len(people))
-    return labels[np.searchsorted(people, IDENTITY)]
-
-
 SPLIT_OF = splitByIdentity(seed=1)
-CONTROL_Y = makeControlLabels(seed=1)
 
 
 def makeBalancedIndices(attribute, seed=1):
@@ -109,7 +100,6 @@ def makeProbeData(features, attribute, site, device="cpu"):
         rows = indices[split]
         data[f"PROBE_{split}_X"] = ((X[rows] - featureMean) / featureStd).to(device)
         data[f"PROBE_{split}_Y"] = torch.from_numpy(ATTR[rows, column]).float().to(device)
-        data[f"PROBE_{split}_Y_CONTROL"] = torch.from_numpy(CONTROL_Y[rows]).float().to(device)
     return data
 
 
@@ -119,14 +109,13 @@ def printSummary():
     for code, split in enumerate(PROBE_SPLITS):
         print(f"probe {split.lower()}: {int((SPLIT_OF == code).sum())} images")
 
-    header = f"{'Attribute':<22} {'posRate':>8} {'train':>8} {'val':>8} {'test':>8} {'ctrlPos':>8}"
+    header = f"{'Attribute':<22} {'posRate':>8} {'train':>8} {'val':>8} {'test':>8}"
     print(header)
     for attribute in ATTRIBUTES:
         column = ATTR_NAMES.index(attribute)
         indices = BALANCED[attribute]
         posRate = ATTR[kept, column].mean()
-        controlRate = CONTROL_Y[indices["TRAIN"]].mean()
-        print(f"{attribute:<22} {posRate:>8.3f} {len(indices['TRAIN']):>8} {len(indices['VAL']):>8} {len(indices['TEST']):>8} {controlRate:>8.3f}")
+        print(f"{attribute:<22} {posRate:>8.3f} {len(indices['TRAIN']):>8} {len(indices['VAL']):>8} {len(indices['TEST']):>8}")
 
 
 if __name__ == "__main__":

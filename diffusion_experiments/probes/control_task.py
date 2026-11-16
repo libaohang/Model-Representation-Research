@@ -14,6 +14,11 @@ from probes.make_control import loadFeatures, makeProbeData
 PROBE_WIDTHS = [32, 64, 128, 256]
 WEIGHT_DECAYS = [0.0, 1e-2, 1e-1, 1.0]
 
+# weight penalties tried for the linear probe, strongest first; the best one differs by cell
+# (large image sets want almost none, rare attributes at 512-dimensional sites want much more)
+LINEAR_L2S = [1.0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5]
+MLP_EPOCHS = 60
+
 
 def makeProbe(inputDim, hiddenWidth=None):
     if(hiddenWidth is None):
@@ -21,100 +26,128 @@ def makeProbe(inputDim, hiddenWidth=None):
     return nn.Sequential(nn.Linear(inputDim, hiddenWidth), nn.GELU(), nn.Linear(hiddenWidth, 1))
 
 
-def _trainOne(probe, X, Y, weightDecay, maxEpochs, batchSize, lr, tolerance):
+# full-batch logistic regression solved with L-BFGS from zero weights: no learning rate, epoch count or
+# stopping rule to tune, and the same answer on every run
+def _trainLinear(X, Y, l2):
+    X, Y = X.double(), Y.double()
+    probe = makeProbe(X.size(1)).to(X.device).double()
+    nn.init.zeros_(probe.weight)
+    nn.init.zeros_(probe.bias)
+    optimizer = torch.optim.LBFGS(probe.parameters(), max_iter=1000, history_size=20, tolerance_grad=1e-6,
+                                  tolerance_change=1e-10, line_search_fn="strong_wolfe")
+
+    def closure():
+        optimizer.zero_grad()
+        loss = F.binary_cross_entropy_with_logits(probe(X).squeeze(1), Y) + 0.5 * l2 * probe.weight.pow(2).sum()
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+    return probe
+
+
+# fixed number of epochs with no early stopping, so every run gets the same budget
+def _trainMLP(probe, X, Y, weightDecay, epochs, batchSize, lr):
     optimizer = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=weightDecay)
     n = X.size(0)
-    previousLoss = None
-
-    for epoch in range(maxEpochs):
+    for _ in range(epochs):
         indices = torch.randperm(n, device=X.device)
-        totalLoss = torch.zeros((), device=X.device)
         for start in range(0, n, batchSize):
             batch = indices[start:start + batchSize]
             loss = F.binary_cross_entropy_with_logits(probe(X[batch]).squeeze(1), Y[batch])
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            totalLoss += loss.detach() * batch.numel()
-
-        epochLoss = totalLoss.item() / n
-        if(previousLoss is not None and abs(previousLoss - epochLoss) < tolerance):
-            break
-        previousLoss = epochLoss
-
-    return epoch + 1
 
 
 @torch.no_grad()
 def _evaluate(probe, X, Y):
-    logits = probe(X).squeeze(1)
-    accuracy = ((logits > 0).float() == Y).float().mean().item()
-    # logit signed positive when it favors the true class
-    margin = ((2 * Y - 1) * logits).mean().item()
-    return accuracy, margin
+    # the linear probe is trained in double precision, the MLP in single
+    logits = probe(X.to(next(probe.parameters()).dtype)).squeeze(1)
+    return ((logits > 0) == (Y > 0.5)).float().mean().item()
 
 
-def trainProbes(data, hiddenWidth=None, weightDecay=1e-2, evalSplit="TEST", maxEpochs=50, batchSize=256, lr=1e-3, tolerance=0.005, seed=0):
-    trainX = data["PROBE_TRAIN_X"]
-    evalX = data[f"PROBE_{evalSplit}_X"]
-    device = trainX.device
+# one probe with one regularization value: the L2 penalty for the linear probe (hiddenWidth=None),
+# AdamW weight decay for the MLP
+def trainProbe(data, hiddenWidth=None, regularization=0.0, evalSplit="TEST", epochs=MLP_EPOCHS, batchSize=256, lr=1e-3, seed=0):
+    trainX, trainY = data["PROBE_TRAIN_X"], data["PROBE_TRAIN_Y"]
 
-    torch.manual_seed(seed)
-    normalProbe = makeProbe(trainX.size(1), hiddenWidth).to(device)
-    controlProbe = makeProbe(trainX.size(1), hiddenWidth).to(device)
+    if(hiddenWidth is None):
+        probe = _trainLinear(trainX, trainY, regularization)
+    else:
+        torch.manual_seed(seed)
+        probe = makeProbe(trainX.size(1), hiddenWidth).to(trainX.device)
+        _trainMLP(probe, trainX, trainY, regularization, epochs, batchSize, lr)
 
-    normalEpochs = _trainOne(normalProbe, trainX, data["PROBE_TRAIN_Y"], weightDecay, maxEpochs, batchSize, lr, tolerance)
-    controlEpochs = _trainOne(controlProbe, trainX, data["PROBE_TRAIN_Y_CONTROL"], weightDecay, maxEpochs, batchSize, lr, tolerance)
-
-    normalAcc, normalMargin = _evaluate(normalProbe, evalX, data[f"PROBE_{evalSplit}_Y"])
-    controlAcc, controlMargin = _evaluate(controlProbe, evalX, data[f"PROBE_{evalSplit}_Y_CONTROL"])
-    trainAcc, _ = _evaluate(normalProbe, trainX, data["PROBE_TRAIN_Y"])
+    trainAcc = _evaluate(probe, trainX, trainY)
+    evalAcc = _evaluate(probe, data[f"PROBE_{evalSplit}_X"], data[f"PROBE_{evalSplit}_Y"])
 
     return {
-        "normalAcc": normalAcc,
-        "controlAcc": controlAcc,
-        "selectivity": normalAcc - controlAcc,
-        "normalMargin": normalMargin,
-        "controlMargin": controlMargin,
+        "evalAcc": evalAcc,
         "trainAcc": trainAcc,
+        # accuracy the probe gains on images it was trained on: its memorization
+        "gap": trainAcc - evalAcc,
         "nTrain": trainX.size(0),
-        "normalEpochs": normalEpochs,
-        "controlEpochs": controlEpochs,
+        "regularization": regularization,
     }
+
+
+# linear probe for the grid: the L2 penalty is chosen on probe val, and the chosen probe is scored on probe test
+def trainSelectedLinear(data):
+    trainX, trainY = data["PROBE_TRAIN_X"], data["PROBE_TRAIN_Y"]
+    best = None
+    for l2 in LINEAR_L2S:
+        probe = _trainLinear(trainX, trainY, l2)
+        valAcc = _evaluate(probe, data["PROBE_VAL_X"], data["PROBE_VAL_Y"])
+        # strict comparison, so ties go to the stronger penalty
+        if(best is None or valAcc > best[0]):
+            best = (valAcc, l2, probe)
+
+    valAcc, l2, probe = best
+    trainAcc = _evaluate(probe, trainX, trainY)
+    testAcc = _evaluate(probe, data["PROBE_TEST_X"], data["PROBE_TEST_Y"])
+    return {"testAcc": testAcc, "valAcc": valAcc, "trainAcc": trainAcc, "gap": trainAcc - testAcc,
+            "l2": l2, "nTrain": trainX.size(0)}
 
 
 def _probeName(hiddenWidth):
     return "linear" if hiddenWidth is None else f"mlp{hiddenWidth}"
 
 
-def compareProbes(features, device):
-    # probe type and weight decay are chosen on probe val, so probe test stays untouched for the grid
-    header = f"{'Site':<6} {'Probe':<8} {'decay':>6} {'normalAcc':>10} {'controlAcc':>11} {'selectivity':>12} {'trainAcc':>9} {'epochs':>7}"
-    print("Smiling, t=100")
-    print(header)
-    for site in ["mid", "up1", "up2"]:
-        data = makeProbeData(features, "Smiling", site, device)
-        for hiddenWidth in [None] + PROBE_WIDTHS:
-            for weightDecay in WEIGHT_DECAYS:
-                r = trainProbes(data, hiddenWidth, weightDecay, evalSplit="VAL")
-                print(f"{site:<6} {_probeName(hiddenWidth):<8} {weightDecay:>6g} {r['normalAcc']:>10.4f} {r['controlAcc']:>11.4f} {r['selectivity']:>12.4f} {r['trainAcc']:>9.4f} {r['normalEpochs']:>7}")
+HEADER = f"{'Site':<6} {'Probe':<8} {'reg':>6} {'trainAcc':>9} {'valAcc':>8} {'gap':>8}"
 
 
-def checkRareAttribute(features, device):
-    # few balanced images at 512-dimensional sites is where overfitting is most likely
-    header = f"{'Site':<6} {'decay':>6} {'trainAcc':>9} {'valAcc':>8} {'gap':>8} {'nTrain':>7}"
-    print("Eyeglasses, t=100, linear probe")
-    print(header)
-    for site in ["mid", "up1"]:
-        data = makeProbeData(features, "Eyeglasses", site, device)
-        for weightDecay in WEIGHT_DECAYS:
-            r = trainProbes(data, None, weightDecay, evalSplit="VAL")
-            print(f"{site:<6} {weightDecay:>6g} {r['trainAcc']:>9.4f} {r['normalAcc']:>8.4f} {r['trainAcc'] - r['normalAcc']:>8.4f} {r['nTrain']:>7}")
+def _printRow(site, hiddenWidth, r):
+    print(f"{site:<6} {_probeName(hiddenWidth):<8} {r['regularization']:>6g} {r['trainAcc']:>9.4f} {r['evalAcc']:>8.4f} {r['gap']:>8.4f}")
+
+
+# every probe and regularization value on probe val (probe test stays untouched for the grid),
+# then each probe at its best regularization, where the gap column shows how much it memorizes
+def compareProbes(features, attribute, sites, widths, device):
+    nTrain = None
+    best = []
+    print(f"\n{attribute}, t=100: all settings")
+    print(HEADER)
+    for site in sites:
+        data = makeProbeData(features, attribute, site, device)
+        for hiddenWidth in [None] + widths:
+            results = []
+            for regularization in (LINEAR_L2S if hiddenWidth is None else WEIGHT_DECAYS):
+                results.append(trainProbe(data, hiddenWidth, regularization, evalSplit="VAL"))
+                _printRow(site, hiddenWidth, results[-1])
+            best.append((site, hiddenWidth, max(results, key=lambda r: r["evalAcc"])))
+            nTrain = results[-1]["nTrain"]
+
+    print(f"\n{attribute}, t=100: each probe at its best regularization ({nTrain} training images)")
+    print(HEADER)
+    for site, hiddenWidth, result in best:
+        _printRow(site, hiddenWidth, result)
 
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(device)
     features = loadFeatures(100)
-    compareProbes(features, device)
-    checkRareAttribute(features, device)
+    compareProbes(features, "Smiling", ["mid", "up1", "up2"], PROBE_WIDTHS, device)
+    # few balanced images at 512-dimensional sites is where memorization is most likely
+    compareProbes(features, "Eyeglasses", ["mid", "up1"], PROBE_WIDTHS, device)

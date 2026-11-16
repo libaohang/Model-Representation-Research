@@ -34,7 +34,6 @@ SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300
 SERIES_MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
 
 SEQUENTIAL = LinearSegmentedColormap.from_list("sequentialBlue", ["#cde2fb", "#86b6ef", "#3987e5", "#1c5cab", "#0d366b"])
-DIVERGING = LinearSegmentedColormap.from_list("divergingBlueRed", ["#1c5cab", "#86b6ef", "#f0efec", "#ec8a8a", "#b02a2a"])
 
 plt.rcParams.update({
     "figure.facecolor": SURFACE,
@@ -62,12 +61,10 @@ def loadResults():
     timesteps = sorted({int(row["timestep"]) for row in rows})
 
     accuracy = {a: np.full((len(timesteps), len(sites)), np.nan) for a in attributes}
-    selectivity = {a: np.full((len(timesteps), len(sites)), np.nan) for a in attributes}
     for row in rows:
         i, j = timesteps.index(int(row["timestep"])), sites.index(row["site"])
-        accuracy[row["attribute"]][i, j] = float(row["normalAcc"])
-        selectivity[row["attribute"]][i, j] = float(row["selectivity"])
-    return attributes, sites, timesteps, accuracy, selectivity
+        accuracy[row["attribute"]][i, j] = float(row["testAcc"])
+    return attributes, sites, timesteps, accuracy
 
 
 def logSNR(timesteps):
@@ -76,28 +73,23 @@ def logSNR(timesteps):
         return np.log(alphaBars / (1 - alphaBars))
 
 
-def plotHeatmaps(attributes, sites, timesteps, accuracy, selectivity):
+def plotHeatmaps(attributes, sites, timesteps, accuracy):
     for attribute in attributes:
-        fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
-        panels = [
-            (accuracy[attribute], SEQUENTIAL, 0.5, 1.0, "Probe accuracy"),
-            (selectivity[attribute], DIVERGING, -0.5, 0.5, "Selectivity (real − control accuracy)"),
-        ]
-        for ax, (values, cmap, low, high, title) in zip(axes, panels):
-            image = ax.imshow(values, cmap=cmap, vmin=low, vmax=high, aspect="auto")
-            ax.set_title(title, loc="left", fontsize=11)
-            ax.set_xticks(range(len(sites)), sites)
-            ax.set_yticks(range(len(timesteps)), timesteps)
-            ax.set_xlabel("Site (network order)")
-            # white gaps separate the cells
-            ax.set_xticks(np.arange(-0.5, len(sites)), minor=True)
-            ax.set_yticks(np.arange(-0.5, len(timesteps)), minor=True)
-            ax.grid(which="minor", color=SURFACE, linewidth=2)
-            ax.tick_params(which="both", length=0)
-            for spine in ax.spines.values():
-                spine.set_visible(False)
-            fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02).outline.set_visible(False)
-        axes[0].set_ylabel("Timestep (0 = clean, 999 = noise)")
+        fig, ax = plt.subplots(figsize=(7.5, 5))
+        image = ax.imshow(accuracy[attribute], cmap=SEQUENTIAL, vmin=0.5, vmax=1.0, aspect="auto")
+        ax.set_title("Probe accuracy on held-out images", loc="left", fontsize=11)
+        ax.set_xticks(range(len(sites)), sites)
+        ax.set_yticks(range(len(timesteps)), timesteps)
+        ax.set_xlabel("Site (network order)")
+        ax.set_ylabel("Timestep (0 = clean, 999 = noise)")
+        # white gaps separate the cells
+        ax.set_xticks(np.arange(-0.5, len(sites)), minor=True)
+        ax.set_yticks(np.arange(-0.5, len(timesteps)), minor=True)
+        ax.grid(which="minor", color=SURFACE, linewidth=2)
+        ax.tick_params(which="both", length=0)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02).outline.set_visible(False)
         fig.suptitle(attribute, x=0.01, ha="left", fontsize=14, fontweight="bold")
         fig.tight_layout()
         fig.savefig(PLOTS_DIR / f"heatmap_{attribute}.png", dpi=150)
@@ -203,8 +195,8 @@ def saveEmergence(points):
 
 if __name__ == "__main__":
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-    attributes, sites, timesteps, accuracy, selectivity = loadResults()
-    plotHeatmaps(attributes, sites, timesteps, accuracy, selectivity)
+    attributes, sites, timesteps, accuracy = loadResults()
+    plotHeatmaps(attributes, sites, timesteps, accuracy)
     plotTimestepSlices(attributes, sites, timesteps, accuracy)
     plotSiteSlices(attributes, sites, timesteps, accuracy)
     saveEmergence(emergencePoints(attributes, sites, timesteps, accuracy))
