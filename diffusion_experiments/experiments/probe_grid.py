@@ -10,33 +10,36 @@ import csv
 import torch
 
 from probes.extract_features import TIMESTEPS, SITE_NAMES
-from probes.make_control import ATTRIBUTES, loadFeatures, makeProbeData
-from probes.control_task import trainSelectedLinear
+from probes.probe_data import ATTRIBUTES, BALANCED, loadFeatures, makeProbeData
+from probes.probe_training import trainSelectedLinear
 
 RESULTS_DIR = ROOT / "results"
 RESULTS_PATH = RESULTS_DIR / "probe_grid.csv"
 
-# the grid uses the linear probe, chosen in the pilot in probes/control_task.py;
+# the grid uses the linear probe, chosen in the pilot in probes/probe_training.py;
 # valAcc and l2 record the penalty selection, testAcc is the reported number
 COLUMNS = ["attribute", "site", "timestep", "testAcc", "valAcc", "trainAcc", "gap", "l2", "nTrain"]
 
 
-def runGrid(device):
+# the defaults are the trained-network grid; the baselines change the feature source and its sites,
+# and every run writes the same columns so the files join on attribute, site and timestep
+def runGrid(device, source="trained", sites=SITE_NAMES, outPath=RESULTS_PATH, timesteps=TIMESTEPS,
+            balanced=BALANCED, pcaWidth=None):
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     rows = []
-    with open(RESULTS_PATH, "w", newline="") as file:
+    with open(outPath, "w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=COLUMNS)
         writer.writeheader()
-        for t in TIMESTEPS:
-            features = loadFeatures(t)
+        for t in timesteps:
+            features = loadFeatures(t, source)
             for attribute in ATTRIBUTES:
-                for site in SITE_NAMES:
-                    data = makeProbeData(features, attribute, site, device)
+                for site in sites:
+                    data = makeProbeData(features, attribute, site, device, balanced, pcaWidth)
                     row = {"attribute": attribute, "site": site, "timestep": t, **trainSelectedLinear(data)}
                     writer.writerow(row)
                     rows.append(row)
                 file.flush()
-                best = max(rows[-len(SITE_NAMES):], key=lambda row: row["testAcc"])
+                best = max(rows[-len(sites):], key=lambda row: row["testAcc"])
                 print(f"t={t:<4} {attribute:<22} best site {best['site']:<6} testAcc {best['testAcc']:.4f} gap {best['gap']:.4f}")
     return rows
 

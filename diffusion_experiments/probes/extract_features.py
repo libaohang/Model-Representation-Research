@@ -17,6 +17,9 @@ from NoiseSchedule import cosineSchedule
 
 DATA_ROOT = ROOT / "data"
 FEATURE_DIR = DATA_ROOT / "features"
+RANDOM_FEATURE_DIR = DATA_ROOT / "features_random"
+RANDOM_SEED1_FEATURE_DIR = DATA_ROOT / "features_random_seed1"
+PIXEL_FEATURE_PATH = DATA_ROOT / "features_pixels" / "pixels.pt"
 
 SPLITS = ["valid", "test"]
 TIMESTEPS = [0, 50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 999]
@@ -43,11 +46,15 @@ BATCH_SIZE = 256
 NOISE_SEED = 0
 
 
-def loadNetwork(device):
+# randomSeed=None loads the trained EMA weights; a seed gives a freshly initialized network instead
+def loadNetwork(device, randomSeed=None):
+    if(randomSeed is not None):
+        torch.manual_seed(randomSeed)
     net = UNet(3, [64, 128, 256, 512, 512], [False, False, True, True, False], 3, 2, 64).to(device)
-    # loadEMA builds "{dataset}checkpoints/...", so an absolute prefix makes it independent of the cwd
-    ema = loadEMA(STEP, EMA(net), str(ROOT / "diffusion_model" / "CelebA"), device=device)
-    ema.applyShadow(net)
+    if(randomSeed is None):
+        # loadEMA builds "{dataset}checkpoints/...", so an absolute prefix makes it independent of the cwd
+        ema = loadEMA(STEP, EMA(net), str(ROOT / "diffusion_model" / "CelebA"), device=device)
+        ema.applyShadow(net)
     net.eval()
     return net
 
@@ -94,18 +101,21 @@ def makeDataset(split):
                            download=True, transform=transform)
 
 
-def sanityChecks(net, x0, device):
+def sanityChecks(net, x0, device, checkWeights=True):
     sqrtA, sqrt1mA, *_ = cosineSchedule(T, device=device)
     x0 = x0.to(device)
     batchSize = x0.size(0)
 
-    # weights loaded: a network without the EMA weights predicts noise with MSE near 1
     eps = torch.randn_like(x0)
     tBatch = torch.full((batchSize,), 500, device=device, dtype=torch.long)
     xt = sqrtA[500] * x0 + sqrt1mA[500] * eps
-    mse = F.mse_loss(net(xt, tBatch), eps).item()
-    print(f"weight check: noise MSE at t=500 = {mse:.4f}")
-    assert mse < 0.2, "noise MSE is too high, the EMA weights were probably not applied"
+
+    # weights loaded: a network without the EMA weights predicts noise with MSE near 1,
+    # so a random-weights network skips this check
+    if(checkWeights):
+        mse = F.mse_loss(net(xt, tBatch), eps).item()
+        print(f"weight check: noise MSE at t=500 = {mse:.4f}")
+        assert mse < 0.2, "noise MSE is too high, the EMA weights were probably not applied"
 
     # hook shapes before pooling
     raw, handles = registerHooks(net, pool=False)
@@ -129,17 +139,17 @@ def sanityChecks(net, x0, device):
     assert maxDiff < 1e-5, "features differ between two passes over the same batch"
 
 
-def extractSplit(net, split, loader, device, seed):
+def extractSplit(net, split, loader, device, seed, outDir=FEATURE_DIR, timesteps=TIMESTEPS):
     sqrtA, sqrt1mA, *_ = cosineSchedule(T, device=device)
     gen = torch.Generator(device=device).manual_seed(seed)
     feats, handles = registerHooks(net)
-    store = {t: {name: [] for name in SITE_NAMES} for t in TIMESTEPS}
+    store = {t: {name: [] for name in SITE_NAMES} for t in timesteps}
 
     for batchIdx, (x0, _) in enumerate(loader):
         x0 = x0.to(device)
         # one noise sample per batch, reused at every timestep
         eps = torch.randn(x0.shape, generator=gen, device=device)
-        for t in TIMESTEPS:
+        for t in timesteps:
             xt = sqrtA[t] * x0 + sqrt1mA[t] * eps
             tBatch = torch.full((x0.size(0),), t, device=device, dtype=torch.long)
             net(xt, tBatch)
@@ -151,10 +161,10 @@ def extractSplit(net, split, loader, device, seed):
     for handle in handles:
         handle.remove()
 
-    outDir = FEATURE_DIR / split
-    outDir.mkdir(parents=True, exist_ok=True)
-    for t in TIMESTEPS:
-        torch.save({name: torch.cat(store[t][name]) for name in SITE_NAMES}, outDir / f"t{t:04d}.pt")
+    splitDir = outDir / split
+    splitDir.mkdir(parents=True, exist_ok=True)
+    for t in timesteps:
+        torch.save({name: torch.cat(store[t][name]) for name in SITE_NAMES}, splitDir / f"t{t:04d}.pt")
 
 
 def saveLabels(dataset, split):
@@ -167,12 +177,14 @@ def saveLabels(dataset, split):
     }, outDir / "labels.pt")
 
 
-def extractFeatures():
+# the noise seeds, batch size and image order do not depend on the network, so a random-weights
+# network sees exactly the noised images the trained one saw
+def extractFeatures(randomSeed=None, outDir=FEATURE_DIR, timesteps=TIMESTEPS):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(device)
 
     with torch.no_grad():
-        net = loadNetwork(device)
+        net = loadNetwork(device, randomSeed)
 
         for splitIdx, split in enumerate(SPLITS):
             dataset = makeDataset(split)
@@ -180,10 +192,12 @@ def extractFeatures():
             print(f"{split}: {len(dataset)} images")
 
             if(splitIdx == 0):
-                sanityChecks(net, torch.stack([dataset[i][0] for i in range(16)]), device)
+                sanityChecks(net, torch.stack([dataset[i][0] for i in range(16)]), device, checkWeights=(randomSeed is None))
 
-            saveLabels(dataset, split)
-            extractSplit(net, split, loader, device, NOISE_SEED + splitIdx)
+            # labels are saved once, next to the trained features
+            if(randomSeed is None):
+                saveLabels(dataset, split)
+            extractSplit(net, split, loader, device, NOISE_SEED + splitIdx, outDir, timesteps)
 
 
 if __name__ == "__main__":

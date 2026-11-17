@@ -34,6 +34,8 @@ SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300
 SERIES_MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
 
 SEQUENTIAL = LinearSegmentedColormap.from_list("sequentialBlue", ["#cde2fb", "#86b6ef", "#3987e5", "#1c5cab", "#0d366b"])
+# for values that can be negative: blue below zero, gray at zero, red above
+DIVERGING = LinearSegmentedColormap.from_list("divergingBlueRed", ["#1c5cab", "#86b6ef", "#f0efec", "#ec8a8a", "#b02a2a"])
 
 plt.rcParams.update({
     "figure.facecolor": SURFACE,
@@ -51,8 +53,8 @@ plt.rcParams.update({
 })
 
 
-def loadResults():
-    with open(RESULTS_PATH, newline="") as file:
+def loadResults(path=RESULTS_PATH):
+    with open(path, newline="") as file:
         rows = list(csv.DictReader(file))
 
     # first-appearance order keeps sites in network order and timesteps ascending
@@ -73,22 +75,27 @@ def logSNR(timesteps):
         return np.log(alphaBars / (1 - alphaBars))
 
 
+def drawHeatmap(ax, values, cmap, low, high, sites, timesteps):
+    image = ax.imshow(values, cmap=cmap, vmin=low, vmax=high, aspect="auto")
+    ax.set_xticks(range(len(sites)), sites)
+    ax.set_yticks(range(len(timesteps)), timesteps)
+    ax.set_xlabel("Site (network order)")
+    # white gaps separate the cells
+    ax.set_xticks(np.arange(-0.5, len(sites)), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(timesteps)), minor=True)
+    ax.grid(which="minor", color=SURFACE, linewidth=2)
+    ax.tick_params(which="both", length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    return image
+
+
 def plotHeatmaps(attributes, sites, timesteps, accuracy):
     for attribute in attributes:
         fig, ax = plt.subplots(figsize=(7.5, 5))
-        image = ax.imshow(accuracy[attribute], cmap=SEQUENTIAL, vmin=0.5, vmax=1.0, aspect="auto")
+        image = drawHeatmap(ax, accuracy[attribute], SEQUENTIAL, 0.5, 1.0, sites, timesteps)
         ax.set_title("Probe accuracy on held-out images", loc="left", fontsize=11)
-        ax.set_xticks(range(len(sites)), sites)
-        ax.set_yticks(range(len(timesteps)), timesteps)
-        ax.set_xlabel("Site (network order)")
         ax.set_ylabel("Timestep (0 = clean, 999 = noise)")
-        # white gaps separate the cells
-        ax.set_xticks(np.arange(-0.5, len(sites)), minor=True)
-        ax.set_yticks(np.arange(-0.5, len(timesteps)), minor=True)
-        ax.grid(which="minor", color=SURFACE, linewidth=2)
-        ax.tick_params(which="both", length=0)
-        for spine in ax.spines.values():
-            spine.set_visible(False)
         fig.colorbar(image, ax=ax, fraction=0.046, pad=0.02).outline.set_visible(False)
         fig.suptitle(attribute, x=0.01, ha="left", fontsize=14, fontweight="bold")
         fig.tight_layout()

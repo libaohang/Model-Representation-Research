@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from probes.make_control import loadFeatures, makeProbeData
+from probes.probe_data import loadFeatures, makeProbeData
 
 PROBE_WIDTHS = [32, 64, 128, 256]
 WEIGHT_DECAYS = [0.0, 1e-2, 1e-1, 1.0]
