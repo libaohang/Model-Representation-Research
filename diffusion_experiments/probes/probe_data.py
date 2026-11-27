@@ -76,12 +76,13 @@ SPLITTERS = {"images": splitByIdentity, "people": splitByPeople}
 SPLIT_OF = splitByIdentity(seed=1)
 
 
-def makeBalancedIndices(attribute, splitOf=SPLIT_OF, seed=1):
+# rowMask restricts every split to a subset of images (such as women only); None keeps all of them
+def makeBalancedIndices(attribute, splitOf=SPLIT_OF, seed=1, rowMask=None):
     column = ATTR_NAMES.index(attribute)
     rng = np.random.default_rng([seed, column])
     indices = {}
     for code, split in enumerate(PROBE_SPLITS):
-        rows = np.flatnonzero(splitOf == code)
+        rows = np.flatnonzero((splitOf == code) & (True if rowMask is None else rowMask))
         positives = rows[ATTR[rows, column] == 1]
         negatives = rows[ATTR[rows, column] == 0]
         numEach = min(len(positives), len(negatives))
@@ -115,6 +116,85 @@ def makeBalancedSets(mode, seed=1):
 BALANCED = {attribute: makeBalancedIndices(attribute) for attribute in ATTRIBUTES}
 
 checkSplits(SPLIT_OF, BALANCED, "images")
+
+WOMEN = ATTR[:, ATTR_NAMES.index("Male")] == 0
+
+PAIR_MODES = ["natural", "decorrelated"]
+
+
+# indices for a target probe whose label is correlated with a confound attribute.
+# training and validation sets: "natural" balances the target only, so the confound keeps its correlation
+# (this is the experiment 1 construction, the same images for the same split and seed); "decorrelated" takes
+# equal counts from all four target x confound cells, so the confound carries no information about the target.
+# test groups, shared by both modes: TEST_ALIGNED holds the two cells that follow the usual correlation,
+# TEST_CONFLICT the two that go against it, each balanced on the target; TEST_ALL is the natural target-balanced test set
+def makePairIndices(target, confound, mode, splitOf, rowMask=None, seed=1):
+    t, c = ATTR_NAMES.index(target), ATTR_NAMES.index(confound)
+    keep = np.ones(len(ATTR), dtype=bool) if rowMask is None else rowMask
+
+    # the usual direction, read from probe-train rows so the test images play no part in it
+    trainRows = np.flatnonzero((splitOf == PROBE_SPLITS.index("TRAIN")) & keep)
+    trainT, trainC = ATTR[trainRows, t], ATTR[trainRows, c]
+    usualWithConfound = trainT[trainC == 1].mean() > trainT[trainC == 0].mean()
+    aligned = [(1, 1), (0, 0)] if usualWithConfound else [(1, 0), (0, 1)]
+    conflict = [cell for cell in [(1, 1), (1, 0), (0, 1), (0, 0)] if cell not in aligned]
+
+    natural = makeBalancedIndices(target, splitOf, seed, rowMask)
+    # separate generators, so the test groups are the same images whichever training set is built
+    testRng = np.random.default_rng([seed, t, c, 0])
+    trainRng = np.random.default_rng([seed, t, c, 1])
+    indices = {"TEST_ALL": natural["TEST"], "usualWithConfound": bool(usualWithConfound)}
+    for code, split in enumerate(PROBE_SPLITS):
+        rows = np.flatnonzero((splitOf == code) & keep)
+        cells = {(a, b): rows[(ATTR[rows, t] == a) & (ATTR[rows, c] == b)] for a in (0, 1) for b in (0, 1)}
+        if(split == "TEST"):
+            for name, group in (("ALIGNED", aligned), ("CONFLICT", conflict)):
+                # each group holds one target-positive and one target-negative cell
+                n = min(len(cells[group[0]]), len(cells[group[1]]))
+                indices[f"TEST_{name}"] = np.sort(np.concatenate([testRng.choice(cells[g], n, replace=False) for g in group]))
+        elif(mode == "decorrelated"):
+            n = min(len(v) for v in cells.values())
+            indices[split] = np.sort(np.concatenate([trainRng.choice(v, n, replace=False) for v in cells.values()]))
+        else:
+            indices[split] = natural[split]
+
+    _checkPairIndices(indices, t, c, mode, aligned, keep)
+    return indices
+
+
+def _checkPairIndices(indices, t, c, mode, aligned, keep):
+    groups = ["TRAIN", "VAL", "TEST_ALIGNED", "TEST_CONFLICT"]
+    allRows = np.concatenate([indices[g] for g in groups])
+    assert len(np.unique(allRows)) == len(allRows), "an image appears in two pair groups"
+    assert not np.isin(indices["TEST_ALL"], np.concatenate([indices["TRAIN"], indices["VAL"]])).any(), "TEST_ALL overlaps training"
+    assert keep[allRows].all() and keep[indices["TEST_ALL"]].all(), "an image outside the row mask was used"
+    for g in groups + ["TEST_ALL"]:
+        assert ATTR[indices[g], t].mean() == 0.5, f"{g} is not balanced on the target"
+    for g, cells in (("TEST_ALIGNED", aligned), ("TEST_CONFLICT", None)):
+        pairs = set(zip(ATTR[indices[g], t].tolist(), ATTR[indices[g], c].tolist()))
+        if(cells is not None):
+            assert pairs == set(cells), f"{g} holds cells {pairs}, expected {set(cells)}"
+        else:
+            assert not (pairs & set(aligned)), f"{g} holds aligned cells"
+    if(mode == "decorrelated"):
+        for g in ["TRAIN", "VAL"]:
+            _, counts = np.unique(ATTR[indices[g]][:, [t, c]], axis=0, return_counts=True)
+            assert len(counts) == 4 and len(set(counts.tolist())) == 1, f"{g} cells are not equal: {counts}"
+
+
+# one standardization, fitted on the probe-train rows, serves the target and the confound probe;
+# keys are PROBE_<group>_X, PROBE_<group>_Y (target) and PROBE_<group>_C (confound)
+def makePairProbeData(features, indices, target, confound, site, device="cpu"):
+    t, c = ATTR_NAMES.index(target), ATTR_NAMES.index(confound)
+    groups = ["TRAIN", "VAL", "TEST_ALL", "TEST_ALIGNED", "TEST_CONFLICT"]
+    X = features[site]
+    splitX, _, _ = _standardize({g: X[indices[g]] for g in groups})
+    data = {}
+    for g in groups:
+        data[f"PROBE_{g}_X"] = splitX[g].to(device)
+        data[f"PROBE_{g}_Y"] = torch.from_numpy(ATTR[indices[g], t]).float().to(device)
+        data[f"PROBE_{g}_C"] = torch.from_numpy(ATTR[indices[g], c]).float().to(device)
+    return data
 
 
 def loadFeatures(t, source="trained"):

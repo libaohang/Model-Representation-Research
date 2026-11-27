@@ -61,7 +61,7 @@ def _trainMLP(probe, X, Y, weightDecay, epochs, batchSize, lr):
 
 
 @torch.no_grad()
-def _evaluate(probe, X, Y):
+def evaluate(probe, X, Y):
     # the linear probe is trained in double precision, the MLP in single
     logits = probe(X.to(next(probe.parameters()).dtype)).squeeze(1)
     return ((logits > 0) == (Y > 0.5)).float().mean().item()
@@ -79,8 +79,8 @@ def trainProbe(data, hiddenWidth=None, regularization=0.0, evalSplit="TEST", epo
         probe = makeProbe(trainX.size(1), hiddenWidth).to(trainX.device)
         _trainMLP(probe, trainX, trainY, regularization, epochs, batchSize, lr)
 
-    trainAcc = _evaluate(probe, trainX, trainY)
-    evalAcc = _evaluate(probe, data[f"PROBE_{evalSplit}_X"], data[f"PROBE_{evalSplit}_Y"])
+    trainAcc = evaluate(probe, trainX, trainY)
+    evalAcc = evaluate(probe, data[f"PROBE_{evalSplit}_X"], data[f"PROBE_{evalSplit}_Y"])
 
     return {
         "evalAcc": evalAcc,
@@ -92,22 +92,24 @@ def trainProbe(data, hiddenWidth=None, regularization=0.0, evalSplit="TEST", epo
     }
 
 
-# linear probe for the grid: the L2 penalty is chosen on probe val, and the chosen probe is scored on probe test
-def trainSelectedLinear(data):
+# linear probe for the grid: the L2 penalty is chosen on probe val, and the chosen probe is scored on probe test;
+# returnProbe also hands back the chosen probe, for scoring other image groups and reading its weights
+def trainSelectedLinear(data, returnProbe=False):
     trainX, trainY = data["PROBE_TRAIN_X"], data["PROBE_TRAIN_Y"]
     best = None
     for l2 in LINEAR_L2S:
         probe = _trainLinear(trainX, trainY, l2)
-        valAcc = _evaluate(probe, data["PROBE_VAL_X"], data["PROBE_VAL_Y"])
+        valAcc = evaluate(probe, data["PROBE_VAL_X"], data["PROBE_VAL_Y"])
         # strict comparison, so ties go to the stronger penalty
         if(best is None or valAcc > best[0]):
             best = (valAcc, l2, probe)
 
     valAcc, l2, probe = best
-    trainAcc = _evaluate(probe, trainX, trainY)
-    testAcc = _evaluate(probe, data["PROBE_TEST_X"], data["PROBE_TEST_Y"])
-    return {"testAcc": testAcc, "valAcc": valAcc, "trainAcc": trainAcc, "gap": trainAcc - testAcc,
-            "l2": l2, "nTrain": trainX.size(0)}
+    trainAcc = evaluate(probe, trainX, trainY)
+    testAcc = evaluate(probe, data["PROBE_TEST_X"], data["PROBE_TEST_Y"])
+    result = {"testAcc": testAcc, "valAcc": valAcc, "trainAcc": trainAcc, "gap": trainAcc - testAcc,
+              "l2": l2, "nTrain": trainX.size(0)}
+    return (result, probe) if returnProbe else result
 
 
 def _probeName(hiddenWidth):
