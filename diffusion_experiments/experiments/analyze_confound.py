@@ -23,7 +23,12 @@ COMPARE_SITE = "up1"
 PIXEL_SITE = "pix512"
 # t = 0 is skipped as the clean reference because of the dip at t = 0 in experiment 1
 CLEAN_TIMESTEP = 50
+# heavy noise where every probe is still well above chance, to see which attribute fades first
+NOISY_TIMESTEP = 700
 SEPARATED = 0.05
+# a site only counts for "best site" if its aligned accuracy is within this of the best site at that timestep,
+# so a near-chance site (where both groups are near 0.5 and the gap is trivially small) can't win
+USABLE_MARGIN = 0.10
 MODES = ["natural", "decorrelated"]
 NUMERIC = ["alignedAcc", "conflictAcc", "gap", "alignedCI", "conflictCI", "confoundReliance", "testAcc", "valAcc",
            "trainAcc", "l2", "confoundValAcc", "confoundL2", "overlap"]
@@ -36,7 +41,12 @@ SET_STYLES = {
 }
 GROUP_STYLES = {"aligned": {"linestyle": "-", "marker": "o"}, "conflict": {"linestyle": "--", "marker": "s", "markerfacecolor": SURFACE}}
 
-TRANSFORMER_ROW = {"pair": "transformer (attractor mismatch)", "naturalSeparationSite": "layer 3"}
+TRANSFORMER_ROW = {"pair": "transformer (attractor mismatch)", "naturalSeparatedSite": "layer 3"}
+
+# from looking at conflict_<target>.png; a pair noted here should not be read as a finding about the model
+LABEL_NOTES = {
+    "Arched_Eyebrows": "conflict-cell labels visibly noisy (makeup worn but Heavy_Makeup=0, arched brows labeled 0)",
+}
 
 
 def loadRows(path):
@@ -78,28 +88,33 @@ def _aboveChance(row):
     return row["alignedAcc"] - 0.5 > row["alignedCI"]
 
 
-def separationTimestep(grid, target, mode):
-    # noisiest timestep up to which the gap at COMPARE_SITE stays below SEPARATED at every cleaner timestep
-    # from CLEAN_TIMESTEP on, counting only above-chance cells
-    separated = None
-    for t in [t for t in grid.timesteps if t >= CLEAN_TIMESTEP]:
-        row = grid.row(target, mode, COMPARE_SITE, t)
-        if(not _aboveChance(row) or row["gap"] >= SEPARATED):
-            break
-        separated = t
-    return separated if separated is not None else "none"
+def gapCI(row):
+    # aligned and conflict are separate image groups, so their intervals add in quadrature
+    return math.hypot(row["alignedCI"], row["conflictCI"])
 
 
-def separationSite(grid, target, mode):
-    for site in grid.sites:
-        row = grid.row(target, mode, site, CLEAN_TIMESTEP)
-        if(_aboveChance(row) and row["gap"] < SEPARATED):
-            return site
+def usableSites(grid, target, mode, t):
+    rows = [grid.row(target, mode, s, t) for s in grid.sites]
+    best = max(r["alignedAcc"] for r in rows)
+    return [r for r in rows if _aboveChance(r) and r["alignedAcc"] >= best - USABLE_MARGIN]
+
+
+def bestSite(grid, target, mode):
+    # the usable site at CLEAN_TIMESTEP whose gap is closest to zero
+    return min(usableSites(grid, target, mode, CLEAN_TIMESTEP), key=lambda r: abs(r["gap"]))
+
+
+def firstSeparatedSite(grid, target, mode):
+    # first usable site, in network order, with the gap below SEPARATED
+    for row in usableSites(grid, target, mode, CLEAN_TIMESTEP):
+        if(abs(row["gap"]) < SEPARATED):
+            return row["site"]
     return "none"
 
 
 def lowestConflict(grid, target, mode):
-    rows = [r for r in grid.rows if r["target"] == target and r["mode"] == mode and _aboveChance(r)]
+    # usable sites only, and not pure noise, where one of ~22 chance-level cells passes _aboveChance by luck
+    rows = [r for t in grid.timesteps if t < max(grid.timesteps) for r in usableSites(grid, target, mode, t)]
     worst = min(rows, key=lambda r: r["conflictAcc"])
     return worst["conflictAcc"], f"{worst['site']} t={worst['timestep']}"
 
@@ -125,7 +140,7 @@ def plotAccuracyCurves(grid, pixels):
     noisy = [t for t in grid.timesteps if t > 0]
     snr = logSNR(noisy)
     for pair in grid.pairs:
-        fig, ax = plt.subplots(figsize=(8.5, 5.2))
+        fig, ax = plt.subplots(figsize=(8.5, 5.8), layout="constrained")
         lines = [(mode, grid, COMPARE_SITE, mode) for mode in MODES] + [("pixels", pixels, PIXEL_SITE, "natural")]
         for label, source, site, mode in lines:
             for group in ("aligned", "conflict"):
@@ -141,11 +156,11 @@ def plotAccuracyCurves(grid, pixels):
         ax.set_ylabel("Probe accuracy")
         ax.grid(axis="y", linewidth=0.8)
         ax.set_axisbelow(True)
-        ax.legend(frameon=False, fontsize=8, ncol=3, loc="lower right")
+        # below the plot, where no curve can sit under it
+        fig.legend(frameon=False, fontsize=9, ncol=3, loc="outside lower center")
         ax.set_title(f"{COMPARE_SITE} (network) and {PIXEL_SITE} (pixels); shading = 95% interval on conflict",
                      loc="left", fontsize=10)
         fig.suptitle(pairName(pair), x=0.01, ha="left", fontsize=14, fontweight="bold")
-        fig.tight_layout()
         fig.savefig(OUT_DIR / f"accuracy_{pair[0]}.png", dpi=150)
         plt.close(fig)
 
@@ -196,19 +211,35 @@ def saveLayerTable(grid):
 
 
 def saveSummary(grid, pixels):
+    # gap = aligned minus conflict accuracy. Natural gap = decorrelated gap (the floor: conflict images that are
+    # harder or mislabeled, which no training set removes) + the shortcut part (what decorrelating training removes)
     rows = []
     for pair in grid.pairs:
         target = pair[0]
-        row = {"pair": pairName(pair)}
-        for mode in MODES:
-            row[f"{mode}SeparationTimestep"] = separationTimestep(grid, target, mode)
-            row[f"{mode}SeparationSite"] = separationSite(grid, target, mode)
+        natural = grid.row(target, "natural", COMPARE_SITE, CLEAN_TIMESTEP)
+        decorrelated = grid.row(target, "decorrelated", COMPARE_SITE, CLEAN_TIMESTEP)
+        best = bestSite(grid, target, "decorrelated")
         lowest, where = lowestConflict(grid, target, "natural")
-        row["lowestConflictAcc"] = round(lowest, 4)
-        row["lowestConflictWhere"] = where
-        row[f"gap{COMPARE_SITE}T{CLEAN_TIMESTEP}"] = round(grid.row(target, "natural", COMPARE_SITE, CLEAN_TIMESTEP)["gap"], 4)
-        row[f"pixelGapT{CLEAN_TIMESTEP}"] = round(pixels.row(target, "natural", PIXEL_SITE, CLEAN_TIMESTEP)["gap"], 4)
-        rows.append(row)
+        rows.append({
+            "pair": pairName(pair),
+            "naturalAligned": round(natural["alignedAcc"], 4),
+            "decorrelatedAligned": round(decorrelated["alignedAcc"], 4),
+            "naturalGap": round(natural["gap"], 4),
+            "decorrelatedGap": round(decorrelated["gap"], 4),
+            "shortcutPart": round(natural["gap"] - decorrelated["gap"], 4),
+            "gapCI": round(max(gapCI(natural), gapCI(decorrelated)), 4),
+            "pixelGap": round(pixels.row(target, "natural", PIXEL_SITE, CLEAN_TIMESTEP)["gap"], 4),
+            "naturalSeparatedSite": firstSeparatedSite(grid, target, "natural"),
+            "decorrelatedSeparatedSite": firstSeparatedSite(grid, target, "decorrelated"),
+            "decorrelatedBestSite": best["site"],
+            "decorrelatedBestGap": round(best["gap"], 4),
+            "decorrelatedBestAligned": round(best["alignedAcc"], 4),
+            "naturalGapNoisy": round(grid.row(target, "natural", COMPARE_SITE, NOISY_TIMESTEP)["gap"], 4),
+            "decorrelatedGapNoisy": round(grid.row(target, "decorrelated", COMPARE_SITE, NOISY_TIMESTEP)["gap"], 4),
+            "lowestConflictAcc": round(lowest, 4),
+            "lowestConflictWhere": where,
+            "labelNote": LABEL_NOTES.get(target, ""),
+        })
     rows.append({key: TRANSFORMER_ROW.get(key, "") for key in rows[0]})
 
     with open(SUMMARY_PATH, "w", newline="") as file:
@@ -216,12 +247,23 @@ def saveSummary(grid, pixels):
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"\nSummary: separation = gap below {SEPARATED:.2f} with the probe above chance "
-          f"(timestep: at every timestep from {CLEAN_TIMESTEP} up to it, at {COMPARE_SITE}; site: first site at t = {CLEAN_TIMESTEP})")
-    keys = list(rows[0].keys())
-    print(" | ".join(keys))
-    for row in rows:
-        print(" | ".join(str(row[k]) for k in keys))
+    print(f"\nSummary at {COMPARE_SITE}, t = {CLEAN_TIMESTEP} (gaps are aligned minus conflict accuracy; "
+          f"shortcut = natural gap minus decorrelated gap)")
+    print(f"{'Pair':<42} {'natGap':>7} {'decGap':>7} {'shortct':>7} {'±CI':>6} {'pixGap':>7} "
+          f"{'t=' + str(NOISY_TIMESTEP) + ' nat/dec':>15}")
+    for r in rows[:-1]:
+        print(f"{r['pair']:<42} {r['naturalGap']:>+7.3f} {r['decorrelatedGap']:>+7.3f} {r['shortcutPart']:>+7.3f} "
+              f"{r['gapCI']:>6.3f} {r['pixelGap']:>+7.3f} {r['naturalGapNoisy']:>+7.3f}/{r['decorrelatedGapNoisy']:+.3f}")
+
+    print(f"\nSites at t = {CLEAN_TIMESTEP}, counting only sites within {USABLE_MARGIN:.2f} of the best aligned accuracy "
+          f"(separated = |gap| below {SEPARATED:.2f})")
+    print(f"{'Pair':<42} {'nat separated':>13} {'dec separated':>13} {'dec best site (gap, aligned)':>30}")
+    for r in rows[:-1]:
+        bestText = f"{r['decorrelatedBestSite']} ({r['decorrelatedBestGap']:+.3f}, {r['decorrelatedBestAligned']:.3f})"
+        print(f"{r['pair']:<42} {r['naturalSeparatedSite']:>13} {r['decorrelatedSeparatedSite']:>13} {bestText:>30}")
+    for r in rows[:-1]:
+        if(r["labelNote"]):
+            print(f"note, {r['pair']}: {r['labelNote']}")
 
 
 def printChecks(grid):
